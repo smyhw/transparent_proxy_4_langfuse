@@ -1,0 +1,62 @@
+# transparent_proxy_4_langfuse 配置示例
+# 所有字段均可省略,省略时使用内置默认值(见各注释;默认值与代码 internal/config/config.go 中 Default 函数一致)
+
+# 代理服务器(监听端)
+server:
+  listen: ":8080"              # 监听地址,如 ":8080" 或 "127.0.0.1:8080"
+  read_header_timeout: 10s     # 读取请求头超时,防慢速攻击
+  idle_timeout: 120s           # 空闲连接保活时间;长连接复用对性能重要
+  # 刻意不提供 ReadTimeout/WriteTimeout:会切断长流式(SSE)响应
+  shutdown_timeout: 30s        # 优雅停机等待在途请求完成的最长时间
+
+# 上游目标(转发目的地)
+target:
+  url: "http://127.0.0.1:11434"      # 上游根地址,请求路径与查询串原样拼接
+  preserve_host: false               # false=Host 头改为上游主机;true=保留客户端 Host 头
+  set_x_forwarded_for: true          # 标准代理行为:追加/设置 X-Forwarded-For
+  max_idle_conns_per_host: 100       # 到上游的保活连接数,流式并发大时调高
+
+# 捕获层:只影响解析与上报,不影响转发
+capture:
+  max_request_bytes: 4194304         # 请求体捕获上限(4MiB),超出置截断标记,转发照常
+  max_response_bytes: 4194304        # 响应体捕获上限(4MiB),同上
+  # 内存预算 ≈ queue.size × (max_request_bytes + max_response_bytes) + 并发在途流 × max_response_bytes
+  # 请按实际流量估算后调整
+
+# 上报队列
+queue:
+  size: 128             # 有界队列容量(条),决定缓存上限
+  workers: 2            # 消费协程数;网络 IO 为主,2~4 足够
+  full_policy: drop     # 队列满策略:drop=丢弃并计数(默认,转发永不阻塞);
+                        # block=等待空位(队列满时该请求的转发会被阻塞,慎用)
+
+# 解析器
+parser:
+  enabled: [openai_chat, anthropic, openai_responses]  # 启用哪些解析器
+  path_include: []      # 额外候选路径(后缀匹配,如 "/v1/azure/deployments/x/chat/completions")
+  path_exclude: []      # 排除路径,即使命中解析器也不解析(仅转发)
+  include_messages: false  # 是否额外上报 gen_ai.input/output.messages 完整消息数组(体积大,默认关)
+
+# Langfuse(OpenTelemetry 原生接入)
+langfuse:
+  endpoint: "https://cloud.langfuse.com"   # Langfuse 根地址;自托管填 http://<host>:3000(需 >= v3.22.0)
+  public_key: "pk-lf-..."                  # 公钥;留空=完全关闭捕获与上报,纯转发
+  secret_key: "sk-lf-..."                  # 密钥
+  ingestion_version: 4                     # 必带请求头 x-langfuse-ingestion-version 的值
+  service_name: "langfuse-proxy"           # 资源属性 service.name(归入 trace metadata)
+  environment: "production"                # 资源属性 deployment.environment
+  user_header: ""                          # 提取 langfuse.user.id 的请求头名,空=不提取
+  session_header: ""                       # 提取 gen_ai.conversation.id 的请求头名,空=不提取
+  user_key_as_user_id: false                # 是否把客户端 API key(x-api-key 或 Authorization 的 Bearer 凭证)作为 langfuse.user.id 上报;默认关,优先级高于 user_header
+  trace_name: ""                           # langfuse.trace.name 静态覆盖;空=默认与 span 名一致("chat <model>")
+  batch:
+    timeout: 2s          # 批量上报等待时间(延迟与吞吐的平衡)
+    max_size: 512        # 单批最大 span 数
+    queue_size: 2048     # SDK 内部批量队列上限;超出由 SDK 丢弃(内存有界)
+  export_timeout: 10s    # 单次导出 HTTP 超时
+  flush_timeout: 10s     # 停机时排空批量队列的最大等待时间
+
+# 日志
+logging:
+  level: info            # debug | info | warn | error
+  stats_interval: 60s    # 周期输出转发/入队/丢弃/解析统计,0=关闭
