@@ -1,0 +1,109 @@
+name: Build & Release (dev)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+          - os: windows
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.25"
+          cache: true
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          BIN="langfuse-proxy-${GOOS}-${GOARCH}"
+          if [ "${GOOS}" = "windows" ]; then
+            BIN="${BIN}.exe"
+          fi
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${BIN}" .
+          echo "bin=${BIN}" >> "$GITHUB_ENV"
+
+      - name: Package
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          mkdir -p dist
+          BIN="langfuse-proxy-${GOOS}-${GOARCH}"
+          if [ "${GOOS}" = "windows" ]; then
+            BIN="${BIN}.exe"
+            zip "dist/langfuse-proxy-${GOOS}-${GOARCH}.zip" "${BIN}"
+          else
+            tar -czf "dist/langfuse-proxy-${GOOS}-${GOARCH}.tar.gz" "${BIN}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: langfuse-proxy-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish dev release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum ./* > checksums.txt
+
+      - name: Move dev tag
+        run: |
+          git tag -f dev
+          git push origin dev --force
+
+      - name: Publish dev release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: dev
+          name: dev
+          allowUpdates: true
+          prerelease: true
+          makeLatest: false
+          artifacts: "dist/*"
+          token: ${{ secrets.GITHUB_TOKEN }}
